@@ -14,7 +14,7 @@ public class BackPropCL {
     public MLPNet net;
 
     private float[] x;
-    private float[] x_cur;
+    protected float[] x_cur;
 
     private float[] t;
     private float[] t_cur;
@@ -36,39 +36,37 @@ public class BackPropCL {
 
     private float nu = 0.01f;
     private float momentum = 0.9f;
-    private int batch;
+    protected int batch;
     private int[] dist;
 
     public float sum[];
     public float out[];
     public float sigma[];
 
-    public BackPropCL(MLPNet net, float[] x, float[] t, int n, int batch, float nu/*, int[] dist*/) {
+    public float prev_weights[];
+
+    public BackPropCL(MLPNet net, float[] x, float[] t, int n, int batch, float nu) {
         this.net = net;
         this.n = n;
         this.x = x;
         this.t = t;
         this.batch = batch;
         this.nu = nu;
-        //this.dist = dist;
         this.fullBatch = n == batch;
+        prev_weights = new float[net.getWeightsSize()];
         sum = new float[batch * net.getHiddenOutputSize()];
         out = new float[batch * net.getHiddenOutputSize()];
         sigma = new float[batch * net.getHiddenOutputSize()];
-        if (!fullBatch)
-        {
+        if (!fullBatch) {
             x_cur = new float[batch * net.getInputSize()];
-            t_cur = new float[batch * net.getInputSize()];
-        }
-        else
-        {
+            t_cur = new float[batch * net.getOutputSize()];
+        } else {
             x_cur = x;
             t_cur = t;
         }
     }
 
-    public void init()
-    {
+    public void init() {
         cl_init(program);
         forwardKernel = createKernel("forward");
         outputErrorKernel = createKernel("output_error");
@@ -92,53 +90,29 @@ public class BackPropCL {
         setBatch();
     }
 
-    private void setBatch()
-    {
-        if (!fullBatch)
-        {
+    private void setBatch() {
+        if (!fullBatch) {
             Random r = new Random();
-            int k = 0;
-            int j = 0;
-            int m = 0;
             int c;
-            List<Integer> c_prevs = new ArrayList<Integer>();
-            for (int i = 0; i < x_cur.length; i+=net.getInputSize())
-            {
-                do {
-                    c = r.nextInt(dist[j]) + k;
-                } while (c_prevs.contains(c));
+            for (int i = 0, m = 0; i < x_cur.length; i += net.getInputSize(), m += net.getOutputSize()) {
+                c = r.nextInt(n);
 
-                c_prevs.add(c);
                 System.arraycopy(x, c * net.getInputSize(), x_cur, i, net.getInputSize());
                 System.arraycopy(t, c * net.getOutputSize(), t_cur, m, net.getOutputSize());
-
-                m += net.getOutputSize();
-                if (j == dist.length - 1)
-                {
-                    k = 0;
-                    j = 0;
-                }
-                else
-                {
-                    k += dist[j];
-                    j++;
-                }
             }
             writeBuffer(memObjects.get(MemObject.SOURCE), Sizeof.cl_float * batch * net.getInputSize(), x_cur);
-            writeBuffer(memObjects.get(MemObject.TARGET), Sizeof.cl_float * batch * net.getInputSize(), t_cur);
+            writeBuffer(memObjects.get(MemObject.TARGET), Sizeof.cl_float * batch * net.getOutputSize(), t_cur);
         }
     }
 
-    public void release()
-    {
+    public void release() {
         cl_release(memObjects, forwardKernel, outputErrorKernel, hiddenErrorKernel, adjustWeightsKernel);
     }
 
-    public void feedForward()
-    {
+    public void feedForward() {
         int outOffset = 0;
         int inputOffset = 0;
-        for (int i = 0; i < net.layerSizes.length - 1; i ++) {
+        for (int i = 0; i < net.layerSizes.length - 1; i++) {
             if (i == 0) {
                 setKernelArg(forwardKernel, 0, Sizeof.cl_mem, memObjects.get(MemObject.SOURCE));
             } else {
@@ -153,10 +127,9 @@ public class BackPropCL {
             setKernelArg(forwardKernel, 7, Sizeof.cl_mem, memObjects.get(MemObject.SUM));
             setKernelArg(forwardKernel, 8, Sizeof.cl_mem, memObjects.get(MemObject.OUT));
 
-            runKernel(forwardKernel, 2, new long[] {batch, net.layerSizes[i + 1]}, null);
+            runKernel(forwardKernel, 2, new long[]{batch, net.layerSizes[i + 1]}, null);
 
-            if (i != 0)
-            {
+            if (i != 0) {
                 inputOffset += batch * net.layerSizes[i];
             }
 
@@ -164,8 +137,7 @@ public class BackPropCL {
         }
     }
 
-    public void outputError()
-    {
+    public void outputError() {
         setKernelArg(outputErrorKernel, 0, Sizeof.cl_mem, memObjects.get(MemObject.TARGET));
         setKernelArg(outputErrorKernel, 1, Sizeof.cl_mem, memObjects.get(MemObject.OUT));
         setKernelArg(outputErrorKernel, 2, Sizeof.cl_mem, memObjects.get(MemObject.SUM));
@@ -173,11 +145,10 @@ public class BackPropCL {
         setKernelArg(outputErrorKernel, 4, Sizeof.cl_int, new int[]{net.getOutputSize()});
         setKernelArg(outputErrorKernel, 5, Sizeof.cl_mem, memObjects.get(MemObject.SIGMA));
 
-        runKernel(outputErrorKernel, 2, new long[] {batch, net.getOutputSize()}, null);
+        runKernel(outputErrorKernel, 2, new long[]{batch, net.getOutputSize()}, null);
     }
 
-    public void hiddenError()
-    {
+    public void hiddenError() {
         for (int i = net.layerSizes.length - 2; i > 0; i--) {
             setKernelArg(hiddenErrorKernel, 0, Sizeof.cl_mem, memObjects.get(MemObject.WEIGHTS));
             setKernelArg(hiddenErrorKernel, 1, Sizeof.cl_mem, memObjects.get(MemObject.SIGMA));
@@ -188,14 +159,13 @@ public class BackPropCL {
             setKernelArg(hiddenErrorKernel, 6, Sizeof.cl_int, new int[]{net.getHiddenSize(i + 1) * batch});
             setKernelArg(hiddenErrorKernel, 7, Sizeof.cl_int, new int[]{net.getHiddenSize(i) * batch});
 
-            runKernel(hiddenErrorKernel, 2, new long[] {batch, net.layerSizes[i]}, null);
+            runKernel(hiddenErrorKernel, 2, new long[]{batch, net.layerSizes[i]}, null);
         }
     }
 
-    public void adjustWeights()
-    {
+    public void adjustWeights() {
         int outOffset = 0;
-        for (int i = 0; i < net.layerSizes.length - 1; i ++) {
+        for (int i = 0; i < net.layerSizes.length - 1; i++) {
             if (i == 0) {
                 setKernelArg(adjustWeightsKernel, 0, Sizeof.cl_mem, memObjects.get(MemObject.SOURCE));
             } else {
@@ -213,46 +183,112 @@ public class BackPropCL {
             setKernelArg(adjustWeightsKernel, 10, Sizeof.cl_mem, memObjects.get(MemObject.WEIGHTS_PREV));
             setKernelArg(adjustWeightsKernel, 11, Sizeof.cl_float, new float[]{momentum});
 
-            runKernel(adjustWeightsKernel, 2, new long[] {net.layerSizes[i + 1], net.getHiddenSizeWithBias(i)}, null);
+            runKernel(adjustWeightsKernel, 2, new long[]{net.layerSizes[i + 1], net.getHiddenSizeWithBias(i)}, null);
 
-            if (i != 0)
-            {
+            if (i != 0) {
                 outOffset += batch * net.layerSizes[i];
             }
         }
     }
 
-    public int train(int s, int maxEpoch)
-    {
+    public int train(int s, int maxEpoch) {
         int k = 0;
         boolean stop = false;
         float delta = 0.0001f;
         int epoch = 0;
-        for(epoch = 0; epoch < maxEpoch && !stop; epoch++)
-        {
+        for (epoch = 0; epoch < maxEpoch && !stop; epoch++) {
             feedForward();
             outputError();
             hiddenError();
             adjustWeights();
             k++;
-            if (k >= s)
-            {
+            if (k >= s) {
                 readBuffer(memObjects.get(MemObject.WEIGHTS), net.getWeightsSize() * Sizeof.cl_float, net.weights);
-                readBuffer(memObjects.get(MemObject.WEIGHTS_PREV), net.getWeightsSize() * Sizeof.cl_float, net.weightsPrev);
+                /*readBuffer(memObjects.get(MemObject.OUT), batch * net.getHiddenOutputSize() * Sizeof.cl_float, out);
+                float[] dest = new float[batch * net.getOutputSize()];
+                System.arraycopy(out, batch * net.getHiddenSize(), dest, 0, batch * net.getOutputSize());
+                float errorSum = 0.f;
+                for (int i = 0; i < dest.length; i ++)
+                {
+                    errorSum += Math.abs(dest[i] - x_cur[i]);
+                }
+                System.out.println(errorSum);*/
                 setBatch();
-                stop = checkDifference(net.weights, net.weightsPrev, delta);
+                stop = checkDifference(net.weights, prev_weights, delta);
+                validate();
                 k = 0;
             }
         }
+        //Final forward for full training set
+        sum = new float[n * net.getHiddenOutputSize()];
+        out = new float[n * net.getHiddenOutputSize()];
+        sigma = new float[n * net.getHiddenOutputSize()];
+        memObjects.put(MemObject.SUM, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getHiddenOutputSize(), sum));
+        memObjects.put(MemObject.OUT, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getHiddenOutputSize(), out));
+        memObjects.put(MemObject.SIGMA, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getHiddenOutputSize(), sigma));
+        memObjects.put(MemObject.SOURCE, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getInputSize(), x));
+        memObjects.put(MemObject.TARGET, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getOutputSize(), t));
+        feedForward();
+        //end
         return epoch;
     }
 
-    private boolean checkDifference(float[] x, float[] y, float delta)
+    protected boolean validate() {return false;}
+
+    protected float[] feedForwardInternal(float[] x, float[] t, int n)
     {
-        for (int i = 0; i < x.length; i++)
-        {
-            if (Math.abs(x[i] - y[i]) > delta)
-            {
+        sum = new float[n * net.getHiddenOutputSize()];
+        out = new float[n * net.getHiddenOutputSize()];
+        sigma = new float[n * net.getHiddenOutputSize()];
+        clReleaseMemObject(memObjects.get(MemObject.SUM));
+        clReleaseMemObject(memObjects.get(MemObject.OUT));
+        clReleaseMemObject(memObjects.get(MemObject.SIGMA));
+        clReleaseMemObject(memObjects.get(MemObject.SOURCE));
+        clReleaseMemObject(memObjects.get(MemObject.TARGET));
+        memObjects.put(MemObject.SUM, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getHiddenOutputSize(), sum));
+        memObjects.put(MemObject.OUT, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getHiddenOutputSize(), out));
+        memObjects.put(MemObject.SIGMA, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getHiddenOutputSize(), sigma));
+        memObjects.put(MemObject.SOURCE, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getInputSize(), x));
+        memObjects.put(MemObject.TARGET, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * n * net.getOutputSize(), t));
+        feedForward();
+        float[] tmp = new float[n * net.getHiddenOutputSize()];
+        readBuffer(memObjects.get(MemObject.OUT), n * net.getHiddenOutputSize() * Sizeof.cl_float, tmp);
+        float[] out = new float[n * net.getOutputSize()];
+        System.arraycopy(tmp, n * net.getHiddenSize(), out, 0, n * net.getOutputSize());
+
+        //Return all back
+        clReleaseMemObject(memObjects.get(MemObject.SUM));
+        clReleaseMemObject(memObjects.get(MemObject.OUT));
+        clReleaseMemObject(memObjects.get(MemObject.SIGMA));
+        clReleaseMemObject(memObjects.get(MemObject.SOURCE));
+        clReleaseMemObject(memObjects.get(MemObject.TARGET));
+        memObjects.put(MemObject.SUM, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * batch * net.getHiddenOutputSize(), sum));
+        memObjects.put(MemObject.OUT, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * batch * net.getHiddenOutputSize(), out));
+        memObjects.put(MemObject.SIGMA, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * batch * net.getHiddenOutputSize(), sigma));
+        memObjects.put(MemObject.SOURCE, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * batch * net.getInputSize(), x_cur));
+        memObjects.put(MemObject.TARGET, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_float * batch * net.getOutputSize(), t_cur));
+        return out;
+    }
+
+    private boolean checkDifference(float[] x, float[] y, float delta) {
+        for (int i = 0; i < x.length; i++) {
+            if (Math.abs(x[i] - y[i]) > delta) {
+                prev_weights = x;
                 return false;
             }
         }
