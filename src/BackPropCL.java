@@ -11,39 +11,34 @@ import static util.CLWrapper.*;
 
 public class BackPropCL {
 
-    public MLPNet net;
-
-    private float[] x;
-    protected float[] x_cur;
-
-    private float[] t;
-    private float[] t_cur;
-
-    private int n;
-    private boolean fullBatch;
-
+    //GPU vars
     private static final String program = "E:\\ms\\backprop\\src\\kernel\\backprop.cl";
-
     public Map<MemObject, cl_mem> memObjects = Maps.newHashMap();
-
     private cl_kernel forwardKernel;
-
     private cl_kernel outputErrorKernel;
-
     private cl_kernel hiddenErrorKernel;
-
     private cl_kernel adjustWeightsKernel;
 
-    private float nu = 0.01f;
-    private float momentum = 0.9f;
-    protected int batch;
-    private int[] dist;
+    //NN vars
+    public MLPNet net;
+
+    private int n;
+    private float[] x;
+    protected float[] x_cur;
+    private float[] t;
+    private float[] t_cur;
 
     public float sum[];
     public float out[];
     public float sigma[];
 
     public float prev_weights[];
+
+    //Learning vars
+    private float nu = 0.01f;
+    private float momentum = 0.9f;
+    protected int batch;
+    protected int ibatch;
 
     public BackPropCL(MLPNet net, float[] x, float[] t, int n, int batch, float nu) {
         this.net = net;
@@ -52,18 +47,12 @@ public class BackPropCL {
         this.t = t;
         this.batch = batch;
         this.nu = nu;
-        this.fullBatch = n == batch;
         prev_weights = new float[net.getWeightsSize()];
         sum = new float[batch * net.getHiddenOutputSize()];
         out = new float[batch * net.getHiddenOutputSize()];
         sigma = new float[batch * net.getHiddenOutputSize()];
-        if (!fullBatch) {
-            x_cur = new float[batch * net.getInputSize()];
-            t_cur = new float[batch * net.getOutputSize()];
-        } else {
-            x_cur = x;
-            t_cur = t;
-        }
+        x_cur = new float[batch * net.getInputSize()];
+        t_cur = new float[batch * net.getOutputSize()];
     }
 
     public void init() {
@@ -87,22 +76,36 @@ public class BackPropCL {
                 Sizeof.cl_float * net.getWeightsSize(), net.weights));
         memObjects.put(MemObject.WEIGHTS_PREV, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                 Sizeof.cl_float * net.getWeightsSize(), net.weights));
-        setBatch();
+        updateBatch();
     }
 
-    private void setBatch() {
-        if (!fullBatch) {
-            Random r = new Random();
-            int c;
-            for (int i = 0, m = 0; i < x_cur.length; i += net.getInputSize(), m += net.getOutputSize()) {
-                c = r.nextInt(n);
+    private void updateBatch() {
+        int start = ibatch;
+        ibatch += batch;
+        if (ibatch >= batch) ibatch = 0;
 
-                System.arraycopy(x, c * net.getInputSize(), x_cur, i, net.getInputSize());
-                System.arraycopy(t, c * net.getOutputSize(), t_cur, m, net.getOutputSize());
-            }
-            writeBuffer(memObjects.get(MemObject.SOURCE), Sizeof.cl_float * batch * net.getInputSize(), x_cur);
-            writeBuffer(memObjects.get(MemObject.TARGET), Sizeof.cl_float * batch * net.getOutputSize(), t_cur);
+        System.arraycopy(x, start * net.getInputSize(), x_cur, 0, batch * net.getInputSize());
+        System.arraycopy(t, start * net.getOutputSize(), t_cur, 0, batch * net.getOutputSize());
+
+        if (ibatch != 0)
+        {
+            clReleaseMemObject(memObjects.get(MemObject.SOURCE));
+            clReleaseMemObject(memObjects.get(MemObject.TARGET));
         }
+        writeBuffer(memObjects.get(MemObject.SOURCE), Sizeof.cl_float * batch * net.getInputSize(), x_cur);
+        writeBuffer(memObjects.get(MemObject.TARGET), Sizeof.cl_float * batch * net.getOutputSize(), t_cur);
+    }
+
+    private void updateBatchRandom() {
+        Random r = new Random();
+        int ir = r.nextInt(n);
+        int start = (n - ir) < batch ? (ir > batch ? ir - batch : 0) : ir;
+
+        System.arraycopy(x, start * net.getInputSize(), x_cur, 0, batch * net.getInputSize());
+        System.arraycopy(t, start * net.getOutputSize(), t_cur, 0, batch * net.getOutputSize());
+
+        writeBuffer(memObjects.get(MemObject.SOURCE), Sizeof.cl_float * batch * net.getInputSize(), x_cur);
+        writeBuffer(memObjects.get(MemObject.TARGET), Sizeof.cl_float * batch * net.getOutputSize(), t_cur);
     }
 
     public void release() {
@@ -192,17 +195,15 @@ public class BackPropCL {
     }
 
     public int train(int s, int maxEpoch) {
-        int k = 0;
         boolean stop = false;
         float delta = 0.0001f;
-        int epoch = 0;
-        for (epoch = 0; epoch < maxEpoch && !stop; epoch++) {
+        int iteration = 0;
+        for (iteration = 0; iteration < maxEpoch && !stop; iteration++) {
             feedForward();
             outputError();
             hiddenError();
             adjustWeights();
-            k++;
-            if (k >= s) {
+            if ((iteration + 1) % s == 0) {
                 readBuffer(memObjects.get(MemObject.WEIGHTS), net.getWeightsSize() * Sizeof.cl_float, net.weights);
                 /*readBuffer(memObjects.get(MemObject.OUT), batch * net.getHiddenOutputSize() * Sizeof.cl_float, out);
                 float[] dest = new float[batch * net.getOutputSize()];
@@ -213,10 +214,9 @@ public class BackPropCL {
                     errorSum += Math.abs(dest[i] - x_cur[i]);
                 }
                 System.out.println(errorSum);*/
-                setBatch();
-                stop = checkDifference(net.weights, prev_weights, delta);
+                stop = false; /*checkDifference(net.weights, prev_weights, delta)*/
                 validate();
-                k = 0;
+                updateBatch();
             }
         }
         //Final forward for full training set
@@ -233,18 +233,22 @@ public class BackPropCL {
                 Sizeof.cl_float * n * net.getInputSize(), x));
         memObjects.put(MemObject.TARGET, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                 Sizeof.cl_float * n * net.getOutputSize(), t));
+        int batchTmp = batch;
+        batch = n;
         feedForward();
+        batch = batchTmp;
         //end
-        return epoch;
+        return iteration;
     }
 
-    protected boolean validate() {return false;}
+    protected boolean validate() {
+        return false;
+    }
 
-    protected float[] feedForwardInternal(float[] x, float[] t, int n)
-    {
-        sum = new float[n * net.getHiddenOutputSize()];
-        out = new float[n * net.getHiddenOutputSize()];
-        sigma = new float[n * net.getHiddenOutputSize()];
+    protected float[] feedForwardInternal(float[] x, float[] t, int n) {
+        float[] sum = new float[n * net.getHiddenOutputSize()];
+        float[] out = new float[n * net.getHiddenOutputSize()];
+        float[] sigma = new float[n * net.getHiddenOutputSize()];
         clReleaseMemObject(memObjects.get(MemObject.SUM));
         clReleaseMemObject(memObjects.get(MemObject.OUT));
         clReleaseMemObject(memObjects.get(MemObject.SIGMA));
@@ -260,11 +264,14 @@ public class BackPropCL {
                 Sizeof.cl_float * n * net.getInputSize(), x));
         memObjects.put(MemObject.TARGET, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                 Sizeof.cl_float * n * net.getOutputSize(), t));
+        int batchTmp = batch;
+        batch = n;
         feedForward();
+        batch = batchTmp;
         float[] tmp = new float[n * net.getHiddenOutputSize()];
         readBuffer(memObjects.get(MemObject.OUT), n * net.getHiddenOutputSize() * Sizeof.cl_float, tmp);
-        float[] out = new float[n * net.getOutputSize()];
-        System.arraycopy(tmp, n * net.getHiddenSize(), out, 0, n * net.getOutputSize());
+        float[] res = new float[n * net.getOutputSize()];
+        System.arraycopy(tmp, n * net.getHiddenSize(), res, 0, n * net.getOutputSize());
 
         //Return all back
         clReleaseMemObject(memObjects.get(MemObject.SUM));
@@ -275,14 +282,14 @@ public class BackPropCL {
         memObjects.put(MemObject.SUM, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                 Sizeof.cl_float * batch * net.getHiddenOutputSize(), sum));
         memObjects.put(MemObject.OUT, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                Sizeof.cl_float * batch * net.getHiddenOutputSize(), out));
+                Sizeof.cl_float * batch * net.getHiddenOutputSize(), res));
         memObjects.put(MemObject.SIGMA, createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                 Sizeof.cl_float * batch * net.getHiddenOutputSize(), sigma));
         memObjects.put(MemObject.SOURCE, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                 Sizeof.cl_float * batch * net.getInputSize(), x_cur));
         memObjects.put(MemObject.TARGET, createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                 Sizeof.cl_float * batch * net.getOutputSize(), t_cur));
-        return out;
+        return res;
     }
 
     private boolean checkDifference(float[] x, float[] y, float delta) {
@@ -294,14 +301,6 @@ public class BackPropCL {
         }
         return true;
     }
-
-    /*public void test(float[] x, int n)
-    {
-        readBuffer(memObjects.get(MemObject.WEIGHTS), Sizeof.cl_float * net.getWeightsSize(), net.weights);
-        MLPNet testNet = new MLPNet(net.weights, net.layerSizes);
-        BackPropCL backPropCL = new BackPropCL(testNet, x, x, n, n, dist);
-        backPropCL.feedForward();
-    }*/
 
     public static void main(String args[]) {
         int n = 91;

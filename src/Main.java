@@ -1,7 +1,6 @@
 import memobjects.MemObject;
 import org.jocl.Sizeof;
 
-import java.io.IOException;
 import java.util.Date;
 
 import static util.CLWrapper.readBuffer;
@@ -13,13 +12,13 @@ public class Main {
 
     public static void main(String args[]) {
 
-        int n = 100;//21
+        int n = 1000;//21
         int v = 28 * 28; //32 * 32;
         int h1 = 196;
         int h2 = 32;
         int h3 = 20;
         int m = 10;//3
-        int batch = 20;
+        int batch = 50;
         float[] w_res = new float[(v + 1) * h1 + (h1 + 1) * h2 + (h2 + 1) * h3 + (h3 + 1) * m];
 
         long before = new Date().getTime();
@@ -46,12 +45,8 @@ public class Main {
         float[] tTestTmp = new float[(nTest + nVal + n) * m];
 
         //DataLoader.readSampleImages(sampleFile, validationFile, x, xOut, t, dist, m);
-        try {
-            MNISTReader.readNumbersImages(labelsFile, imagesFile, xTestTmp, tTestTmp, nTest + n);
-            System.out.println("Read MNIST done. Number of used images: " + x.length / v);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        MNISTReader.readNumbersImages(labelsFile, imagesFile, xTestTmp, tTestTmp, nTest + n);
+        System.out.println("Read MNIST done. Number of used images: " + x.length / v);
 
         System.arraycopy(xTestTmp, 0, x, 0, n * v);
         System.arraycopy(tTestTmp, 0, t, 0, n * m);
@@ -62,7 +57,7 @@ public class Main {
         BackPropCL autoEncoder1 = new BackPropCLVal(net1, x, x, n, batch, 0.01f, xVal, xVal, nVal);
         autoEncoder1.init();
 
-        System.out.println(autoEncoder1.train(20, 60000));
+        System.out.println(autoEncoder1.train(10, 60000));
 
         readBuffer(autoEncoder1.memObjects.get(MemObject.OUT), n * net1.getHiddenOutputSize() * Sizeof.cl_float, autoEncoder1.out);
         readBuffer(autoEncoder1.memObjects.get(MemObject.WEIGHTS), net1.getWeightsSize() * Sizeof.cl_float, autoEncoder1.net.weights);
